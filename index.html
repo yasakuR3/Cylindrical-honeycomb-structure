@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>円筒ハニカム STL ジェネレータ</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- Pyodide: ブラウザで Python を動かすためのライブラリ -->
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 1.5rem;
+      background: #f5f5f5;
+      color: #333;
+    }
+    h1 {
+      font-size: 1.5rem;
+      margin-bottom: 0.5rem;
+    }
+    .card {
+      background: #fff;
+      padding: 1rem 1.5rem;
+      border-radius: 12px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+      max-width: 640px;
+    }
+    .field {
+      display: flex;
+      align-items: center;
+      margin-bottom: 0.6rem;
+      gap: 0.7rem;
+    }
+    .field label {
+      min-width: 150px;
+    }
+    .field input {
+      flex: 1;
+      padding: 0.3rem 0.5rem;
+      border-radius: 6px;
+      border: 1px solid #ccc;
+    }
+    button {
+      margin-top: 0.8rem;
+      padding: 0.4rem 1.2rem;
+      border-radius: 999px;
+      border: none;
+      cursor: pointer;
+      font-size: 0.95rem;
+      background: #1976d2;
+      color: #fff;
+    }
+    button:disabled {
+      background: #aaa;
+      cursor: wait;
+    }
+    #status {
+      margin-top: 0.8rem;
+      font-size: 0.9rem;
+    }
+    small {
+      color: #666;
+      font-size: 0.8rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>円筒ハニカム STL ジェネレータ</h1>
+    <p>
+      設計変数を入力して「STL生成」を押すと、ブラウザ内で Python が実行されて
+      <code>.stl</code> ファイルをダウンロードします。<br>
+      （数値はそのまま「mm」として扱われるので、Fusion 360 などでは単位を mm で読み込んでください）
+    </p>
+
+    <div class="field">
+      <label for="input_l">l (辺長) [mm]</label>
+      <input type="number" id="input_l" value="7" step="0.1" />
+    </div>
+    <div class="field">
+      <label for="input_theta">θ (分割角) [deg]</label>
+      <input type="number" id="input_theta" value="20" step="0.1" />
+    </div>
+    <div class="field">
+      <label for="input_h">h (高さ) [mm]</label>
+      <input type="number" id="input_h" value="10" step="0.1" />
+    </div>
+    <div class="field">
+      <label for="input_t">t (板厚) [mm]</label>
+      <input type="number" id="input_t" value="1.0" step="0.1" />
+    </div>
+    <div class="field">
+      <label for="input_a">a (パネル角) [deg]</label>
+      <input type="number" id="input_a" value="120" step="0.1" />
+    </div>
+
+    <button id="btnGenerate">STL生成</button>
+    <div id="status"><small>初回は Python 読み込みのため数秒かかります。</small></div>
+  </div>
+
+  <script>
+    // ===============================
+    // Pyodide 初期化 & Pythonコード定義
+    // ===============================
+    let pyodideReadyPromise = null;
+
+    async function initPyodideAndPython() {
+      if (!pyodideReadyPromise) {
+        pyodideReadyPromise = (async () => {
+          const pyodide = await loadPyodide({
+            indexURL: "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/"
+          });
+          // numpy をロード
+          await pyodide.loadPackage("numpy");
+
+          // STL生成ロジック（Python）
+          const pythonCode = `
+import numpy as np
+import math
+
+def generate_vertices_faces(l, theta, h, t, a):
+    # === 外側円半径 Rout を計算 ===
+    term1 = l**2 + l**2 * np.cos(np.radians(180 - a))**2
+    term2 = 2 * l**2 * np.cos(np.radians(180 - a)) * np.cos(np.radians(180 - theta/2))
+    denominator = 4 * (np.sin(np.radians(theta/2))**2)
+
+    Rni = (term1 - term2) / denominator - (l**2 / 4)
+    Rout = np.sqrt(Rni)
+
+    # 周方向分割数
+    n = 360 / theta
+    n_int = int(n)
+
+    # hanikamu[h, i, j, k]
+    #   h : 0=中心, 1=+t/2, 2=-t/2
+    #   i : 周方向インデックス (0 ～ n_int-1)
+    #   j : 台形の頂点 (0:A, 1:B, 2:C, 3:D)
+    #   k : 座標 (0:x, 1:y, 2:z)
+    hanikamu = np.zeros((3, n_int, 4, 3), dtype=float)
+
+    # === 基準台形 (i = 0) ===
+    # 点A (中心層)
+    hanikamu[0, 0, 0, 0] = Rout
+    hanikamu[0, 0, 0, 1] = l / 2.0
+    hanikamu[0, 0, 0, 2] = l * np.sin(np.radians(180 - a))
+
+    # 点B x軸対称
+    hanikamu[0, 0, 1, 0] = hanikamu[0, 0, 0, 0]
+    hanikamu[0, 0, 1, 1] = -hanikamu[0, 0, 0, 1]
+    hanikamu[0, 0, 1, 2] = hanikamu[0, 0, 0, 2]
+
+    # 点C
+    hanikamu[0, 0, 2, 0] = hanikamu[0, 0, 0, 0] - h * np.cos(np.radians(theta/2.0))
+    hanikamu[0, 0, 2, 1] = hanikamu[0, 0, 0, 1] - h * np.sin(np.radians(theta/2.0))
+    hanikamu[0, 0, 2, 2] = hanikamu[0, 0, 0, 2]
+
+    # 点D x軸対称
+    hanikamu[0, 0, 3, 0] = hanikamu[0, 0, 2, 0]
+    hanikamu[0, 0, 3, 1] = -hanikamu[0, 0, 2, 1]
+    hanikamu[0, 0, 3, 2] = hanikamu[0, 0, 0, 2]
+
+    # === 厚さ +方向 (h_idx=1) ===
+    # 中心層から +t/2 へオフセット
+    offset_y = (t / 2.0) * np.tan(np.radians((180 - a) / 2.0))
+
+    # A_1
+    hanikamu[1, 0, 0, 0] = hanikamu[0, 0, 0, 0]
+    hanikamu[1, 0, 0, 1] = hanikamu[0, 0, 0, 1] + offset_y
+    hanikamu[1, 0, 0, 2] = hanikamu[0, 0, 0, 2] + (t / 2.0)
+
+    # B_1
+    hanikamu[1, 0, 1, 0] = hanikamu[1, 0, 0, 0]
+    hanikamu[1, 0, 1, 1] = -hanikamu[1, 0, 0, 1]
+    hanikamu[1, 0, 1, 2] = hanikamu[1, 0, 0, 2]
+
+    # C_1
+    hanikamu[1, 0, 2, 0] = hanikamu[0, 0, 2, 0]
+    hanikamu[1, 0, 2, 1] = hanikamu[0, 0, 2, 1] + offset_y
+    hanikamu[1, 0, 2, 2] = hanikamu[0, 0, 2, 2] + (t / 2.0)
+
+    # D_1
+    hanikamu[1, 0, 3, 0] = hanikamu[1, 0, 2, 0]
+    hanikamu[1, 0, 3, 1] = -hanikamu[1, 0, 2, 1]
+    hanikamu[1, 0, 3, 2] = hanikamu[1, 0, 2, 2]
+
+    # === 厚さ -方向 (h_idx=2) ===
+    offset_y2 = -(t / 2.0) * np.tan(np.radians((180 - a) / 2.0))
+
+    # A_2
+    hanikamu[2, 0, 0, 0] = hanikamu[0, 0, 0, 0]
+    hanikamu[2, 0, 0, 1] = hanikamu[0, 0, 0, 1] + offset_y2
+    hanikamu[2, 0, 0, 2] = hanikamu[0, 0, 0, 2] - (t / 2.0)
+
+    # B_2
+    hanikamu[2, 0, 1, 0] = hanikamu[2, 0, 0, 0]
+    hanikamu[2, 0, 1, 1] = -hanikamu[2, 0, 0, 1]
+    hanikamu[2, 0, 1, 2] = hanikamu[2, 0, 0, 2]
+
+    # C_2
+    hanikamu[2, 0, 2, 0] = hanikamu[0, 0, 2, 0]
+    hanikamu[2, 0, 2, 1] = hanikamu[0, 0, 2, 1] + offset_y2
+    hanikamu[2, 0, 2, 2] = hanikamu[0, 0, 2, 2] - (t / 2.0)
+
+    # D_2
+    hanikamu[2, 0, 3, 0] = hanikamu[2, 0, 2, 0]
+    hanikamu[2, 0, 3, 1] = -hanikamu[2, 0, 2, 1]
+    hanikamu[2, 0, 3, 2] = hanikamu[2, 0, 2, 2]
+
+    # === 厚さを考慮した 2番目の台形 (+方向) ===
+    team_x = hanikamu[1, 0, 0, 0] - hanikamu[1, 0, 2, 0]
+    team_y = hanikamu[1, 0, 0, 1] - hanikamu[1, 0, 2, 1]
+    kakudo = np.degrees(np.arctan2(team_y, team_x))
+
+    c2 = np.cos(np.radians(2 * theta))
+    s2 = np.sin(np.radians(2 * theta))
+
+    # B_1 と D_1 を2θ回転させた差分で team_b を求める
+    h1x = hanikamu[1, 0, 1, 0] * c2 - hanikamu[1, 0, 1, 1] * s2
+    h2x = hanikamu[1, 0, 3, 0] * c2 - hanikamu[1, 0, 3, 1] * s2
+    team2_x = h1x - h2x
+
+    h1y = hanikamu[1, 0, 1, 0] * s2 + hanikamu[1, 0, 1, 1] * c2
+    h2y = hanikamu[1, 0, 3, 0] * s2 + hanikamu[1, 0, 3, 1] * c2
+    team2_y = h1y - h2y
+
+    team_b = np.degrees(np.arctan2(team2_y, team2_x))
+
+    cos180a = np.cos(np.radians(180 - a))
+
+    # A_1' (h_idx=1, i=1, j=0)
+    bx_rot = hanikamu[1, 0, 1, 0] * c2 - hanikamu[1, 0, 1, 1] * s2
+    by_rot = hanikamu[1, 0, 1, 0] * s2 + hanikamu[1, 0, 1, 1] * c2
+    hanikamu[1, 1, 0, 0] = bx_rot + l * cos180a * np.sin(np.radians(team_b))
+    hanikamu[1, 1, 0, 1] = by_rot - l * cos180a * np.cos(np.radians(team_b))
+    hanikamu[1, 1, 0, 2] = (t / 2.0)
+
+    # B_1' (j=1)
+    hanikamu[1, 1, 1, 0] = hanikamu[1, 0, 0, 0] - l * cos180a * np.sin(np.radians(kakudo))
+    hanikamu[1, 1, 1, 1] = hanikamu[1, 0, 0, 1] + l * cos180a * np.cos(np.radians(kakudo))
+    hanikamu[1, 1, 1, 2] = (t / 2.0)
+
+    # C_1' (j=2)
+    dx_rot = hanikamu[1, 0, 3, 0] * c2 - hanikamu[1, 0, 3, 1] * s2
+    dy_rot = hanikamu[1, 0, 3, 0] * s2 + hanikamu[1, 0, 3, 1] * c2
+    hanikamu[1, 1, 2, 0] = dx_rot + l * cos180a * np.sin(np.radians(team_b))
+    hanikamu[1, 1, 2, 1] = dy_rot - l * cos180a * np.cos(np.radians(team_b))
+    hanikamu[1, 1, 2, 2] = (t / 2.0)
+
+    # D_1' (j=3)
+    hanikamu[1, 1, 3, 0] = hanikamu[1, 0, 2, 0] - l * cos180a * np.sin(np.radians(kakudo))
+    hanikamu[1, 1, 3, 1] = hanikamu[1, 0, 2, 1] + l * cos180a * np.cos(np.radians(kakudo))
+    hanikamu[1, 1, 3, 2] = (t / 2.0)
+
+    # === 厚さを考慮した 2番目の台形 (-方向, h_idx=2) ===
+    team3_x = hanikamu[2, 0, 0, 0] - hanikamu[2, 0, 2, 0]
+    team3_y = hanikamu[2, 0, 0, 1] - hanikamu[2, 0, 2, 1]
+    kakudo2 = np.degrees(np.arctan2(team3_y, team3_x))
+
+    h5x = hanikamu[2, 0, 1, 0] * c2 - hanikamu[2, 0, 1, 1] * s2
+    h6x = hanikamu[2, 0, 3, 0] * c2 - hanikamu[2, 0, 3, 1] * s2
+    team4_x = h5x - h6x
+
+    h5y = hanikamu[2, 0, 1, 0] * s2 + hanikamu[2, 0, 1, 1] * c2
+    h6y = hanikamu[2, 0, 3, 0] * s2 + hanikamu[2, 0, 3, 1] * c2
+    team4_y = h5y - h6y
+
+    team2_b = np.degrees(np.arctan2(team4_y, team4_x))
+
+    # A_2' (h_idx=2, i=1, j=0)
+    b2x_rot = hanikamu[2, 0, 1, 0] * c2 - hanikamu[2, 0, 1, 1] * s2
+    b2y_rot = hanikamu[2, 0, 1, 0] * s2 + hanikamu[2, 0, 1, 1] * c2
+    hanikamu[2, 1, 0, 0] = b2x_rot + l * cos180a * np.sin(np.radians(team2_b))
+    hanikamu[2, 1, 0, 1] = b2y_rot - l * cos180a * np.cos(np.radians(team2_b))
+    hanikamu[2, 1, 0, 2] = -(t / 2.0)
+
+    # B_2'
+    hanikamu[2, 1, 1, 0] = hanikamu[2, 0, 0, 0] - l * cos180a * np.sin(np.radians(kakudo2))
+    hanikamu[2, 1, 1, 1] = hanikamu[2, 0, 0, 1] + l * cos180a * np.cos(np.radians(kakudo2))
+    hanikamu[2, 1, 1, 2] = -(t / 2.0)
+
+    # C_2'
+    d2x_rot = hanikamu[2, 0, 3, 0] * c2 - hanikamu[2, 0, 3, 1] * s2
+    d2y_rot = hanikamu[2, 0, 3, 0] * s2 + hanikamu[2, 0, 3, 1] * c2
+    hanikamu[2, 1, 2, 0] = d2x_rot + l * cos180a * np.sin(np.radians(team2_b))
+    hanikamu[2, 1, 2, 1] = d2y_rot - l * cos180a * np.cos(np.radians(team2_b))
+    hanikamu[2, 1, 2, 2] = -(t / 2.0)
+
+    # D_2'
+    hanikamu[2, 1, 3, 0] = hanikamu[2, 0, 2, 0] - l * cos180a * np.sin(np.radians(kakudo2))
+    hanikamu[2, 1, 3, 1] = hanikamu[2, 0, 2, 1] + l * cos180a * np.cos(np.radians(kakudo2))
+    hanikamu[2, 1, 3, 2] = -(t / 2.0)
+
+    # === 回転して全周に並べる (中心層) ===
+    c = np.cos(np.radians(theta))
+    s = np.sin(np.radians(theta))
+
+    for i in range(1, n_int):
+        for j in range(4):
+            x_prev = hanikamu[0, i-1, j, 0]
+            y_prev = hanikamu[0, i-1, j, 1]
+            hanikamu[0, i, j, 0] = x_prev * c - y_prev * s
+            hanikamu[0, i, j, 1] = x_prev * s + y_prev * c
+
+        # zは 1つおきに 0 / 基準高さ を切り替え
+        if i % 2 == 1:
+            hanikamu[0, i, :, 2] = 0
+        else:
+            hanikamu[0, i, :, 2] = hanikamu[0, 0, 0, 2]
+
+    # === 回転して全周に並べる (+方向, -方向) ===
+    for h_idx in (1, 2):
+        for i in range(2, n_int):
+            if i % 2 == 0:
+                zref = hanikamu[h_idx, 0, 0, 2]
+            else:
+                zref = hanikamu[h_idx, 1, 0, 2]
+
+            for j in range(4):
+                x_prev = hanikamu[h_idx, i-2, j, 0]
+                y_prev = hanikamu[h_idx, i-2, j, 1]
+                hanikamu[h_idx, i, j, 0] = x_prev * c2 - y_prev * s2
+                hanikamu[h_idx, i, j, 1] = x_prev * s2 + y_prev * c2
+                hanikamu[h_idx, i, j, 2] = zref
+
+    # === 三角形インデックス生成 ===
+    triangle_indices = []
+
+    for i in range(0, n_int):
+        # 上下面
+        triangle_indices.append(((2, i, 0), (2, i, 1), (2, i, 2)))
+        triangle_indices.append(((2, i, 1), (2, i, 2), (2, i, 3)))
+
+        triangle_indices.append(((1, i, 0), (1, i, 1), (1, i, 2)))
+        triangle_indices.append(((1, i, 1), (1, i, 2), (1, i, 3)))
+
+        # 周方向のつなぎ (上下)
+        if i != n_int - 1:
+            triangle_indices.append(((2, i, 0), (2, i, 2), (2, i+1, 3)))
+            triangle_indices.append(((2, i, 0), (2, i+1, 1), (2, i+1, 3)))
+
+            triangle_indices.append(((1, i, 0), (1, i, 2), (1, i+1, 3)))
+            triangle_indices.append(((1, i, 0), (1, i+1, 1), (1, i+1, 3)))
+        else:
+            triangle_indices.append(((2, i, 0), (2, i, 2), (2, 0, 3)))
+            triangle_indices.append(((2, i, 0), (2, 0, 1), (2, 0, 3)))
+
+            triangle_indices.append(((1, i, 0), (1, i, 2), (1, 0, 3)))
+            triangle_indices.append(((1, i, 0), (1, 0, 1), (1, 0, 3)))
+
+        # 側面（厚さ方向のつなぎ）
+        triangle_indices.append(((2, i, 0), (2, i, 1), (1, i, 1)))
+        triangle_indices.append(((2, i, 0), (1, i, 1), (1, i, 0)))
+
+        triangle_indices.append(((2, i, 2), (2, i, 3), (1, i, 3)))
+        triangle_indices.append(((2, i, 2), (1, i, 3), (1, i, 2)))
+
+        if i != n_int - 1:
+            triangle_indices.append(((2, i, 0), (1, i, 0), (2, i+1, 1)))
+            triangle_indices.append(((1, i, 0), (2, i+1, 1), (1, i+1, 1)))
+
+            triangle_indices.append(((2, i, 2), (1, i, 2), (2, i+1, 3)))
+            triangle_indices.append(((1, i, 2), (2, i+1, 3), (1, i+1, 3)))
+        else:
+            triangle_indices.append(((2, i, 0), (1, i, 0), (2, 0, 1)))
+            triangle_indices.append(((1, i, 0), (2, 0, 1), (1, 0, 1)))
+
+            triangle_indices.append(((2, i, 2), (1, i, 2), (2, 0, 3)))
+            triangle_indices.append(((1, i, 2), (2, 0, 3), (1, 0, 3)))
+
+    # === 頂点配列と面配列に変換 ===
+    vertices = []
+    faces = []
+    vertex_map = {}
+
+    for tri in triangle_indices:
+        face = []
+        for key in tri:
+            if key not in vertex_map:
+                h_idx, i_idx, j_idx = key
+                x, y, z = hanikamu[h_idx, i_idx, j_idx, :]
+                vertex_map[key] = len(vertices)
+                vertices.append((float(x), float(y), float(z)))
+            face.append(vertex_map[key])
+        faces.append(tuple(face))
+
+    return np.array(vertices), np.array(faces, dtype=int)
+
+
+def to_stl_ascii(vertices, faces, name="cylindrical_honeycomb"):
+    lines = [f"solid {name}"]
+    for f in faces:
+        v1 = vertices[f[0]]
+        v2 = vertices[f[1]]
+        v3 = vertices[f[2]]
+
+        # 法線ベクトル計算
+        ax, ay, az = v2 - v1
+        bx, by, bz = v3 - v1
+        nx = ay * bz - az * by
+        ny = az * bx - ax * bz
+        nz = ax * by - ay * bx
+        length = math.sqrt(nx*nx + ny*ny + nz*nz)
+        if length == 0:
+            nx = ny = nz = 0.0
+        else:
+            nx /= length
+            ny /= length
+            nz /= length
+
+        lines.append(f"  facet normal {nx:.6e} {ny:.6e} {nz:.6e}")
+        lines.append("    outer loop")
+        lines.append(f"      vertex {v1[0]:.6e} {v1[1]:.6e} {v1[2]:.6e}")
+        lines.append(f"      vertex {v2[0]:.6e} {v2[1]:.6e} {v2[2]:.6e}")
+        lines.append(f"      vertex {v3[0]:.6e} {v3[1]:.6e} {v3[2]:.6e}")
+        lines.append("    endloop")
+        lines.append("  endfacet")
+    lines.append(f"endsolid {name}")
+    return "\\n".join(lines)
+
+
+def generate_honeycomb_stl(l, theta, h, t, a):
+    vertices, faces = generate_vertices_faces(l, theta, h, t, a)
+    name = f"cylindrical_honeycomb_l{l:g}_theta{theta:g}_h{h:g}_t{t:g}_a{a:g}"
+    stl = to_stl_ascii(vertices, faces, name=name)
+    return name, stl
+          `;
+
+          await pyodide.runPythonAsync(pythonCode);
+          return pyodide;
+        })();
+      }
+      return pyodideReadyPromise;
+    }
+
+    // ===============================
+    // ボタン押下で STL 生成
+    // ===============================
+    async function onGenerateClick() {
+      const btn = document.getElementById("btnGenerate");
+      const status = document.getElementById("status");
+
+      try {
+        btn.disabled = true;
+        status.textContent = "Python/NumPy 読み込み中...";
+
+        const pyodide = await initPyodideAndPython();
+
+        // 入力値を取得
+        const l = parseFloat(document.getElementById("input_l").value || "7");
+        const theta = parseFloat(document.getElementById("input_theta").value || "20");
+        const h = parseFloat(document.getElementById("input_h").value || "10");
+        const t = parseFloat(document.getElementById("input_t").value || "1.0");
+        const a = parseFloat(document.getElementById("input_a").value || "120");
+
+        status.textContent = "STL 生成中...";
+
+        // Python 側の関数を呼び出す
+        const callCode = `
+name, stl = generate_honeycomb_stl(${l}, ${theta}, ${h}, ${t}, ${a})
+        `;
+        await pyodide.runPythonAsync(callCode);
+
+        // Pyodide から Python 変数をそのまま JS 文字列として取得
+        const name = pyodide.runPython("name");
+        const stl = pyodide.runPython("stl");
+
+        // ブラウザで STL をダウンロード
+        const blob = new Blob([stl], { type: "model/stl" });
+        const url = URL.createObjectURL(blob);
+        const aEl = document.createElement("a");
+        aEl.href = url;
+        aEl.download = name + ".stl";
+        document.body.appendChild(aEl);
+        aEl.click();
+        document.body.removeChild(aEl);
+        URL.revokeObjectURL(url);
+
+        status.textContent = `STL ファイルをダウンロードしました: ${name}.stl`;
+      } catch (e) {
+        console.error(e);
+        status.textContent = "エラーが発生しました: " + e;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    document.getElementById("btnGenerate").addEventListener("click", onGenerateClick);
+  </script>
+</body>
+</html>
